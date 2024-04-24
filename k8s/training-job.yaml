@@ -1,0 +1,73 @@
+# Service to open a port for torchrun master-worker node communication.
+apiVersion: v1
+kind: Service
+metadata:
+  name: multinode-training
+  labels:
+    app: multinode-training
+spec:
+  clusterIP: None # No need for external access.
+  ports:
+  - name: nccl  # Port for torchrun master-worker node communication.
+    port: 29500
+    targetPort: 29500
+  selector:
+    job-name: multinode-training  # Selector for pods from the Job to be associated with this service.
+
+---
+
+# Job configuration for multinode training.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    app: multinode-training
+  name: multinode-training
+spec:
+  completionMode: Indexed
+  completions: 2  # This should match the number of nodes
+  parallelism: 2  # This should match the number of nodes
+  template:
+    spec:
+      containers:
+      - image: ghcr.io/sunu/multinode-training:7ba883438c6f75f4ccec194dce5d1a0585c4a1a2 # Our image with the training script
+        name:
+          multinode
+        args:
+        - sh
+        - -c
+        - torchrun --nproc_per_node $NGPUS --nnodes $NNODES --node_rank $JOB_COMPLETION_INDEX --master_addr $MASTER_ADDR --master_port $MASTER_PORT train.py
+        env:
+        - name: MASTER_ADDR
+          value: multinode-training-0.multinode-training  # Node with rank 0 is chosen as the master node.
+        - name: MASTER_PORT
+          value: '29500'
+        - name: NNODES
+          value: '2'  # Number of nodes
+        - name: NGPUS
+          value: '1'  # Number of GPUs in each node
+        - name: MULTI_NODE
+          value: '1'  # Flag to enable multi-node training in the training script
+        ports:
+        - containerPort: 29500
+          name: nccl
+        resources:
+          limits:
+            nvidia.com/gpu: '1'  # Request the max available number of GPUs in the node
+        volumeMounts:
+        - mountPath: /dev/shm  # emptyDir as shared memory for communication within nodes
+          name: shm
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Equal"
+        value: "present"
+        effect: "NoSchedule"
+      nodeSelector:
+        "gpu": "true"
+      restartPolicy: Never
+      subdomain: multinode-training  # Required for communication between pods
+      volumes:
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 15Gi
+        name: shm
